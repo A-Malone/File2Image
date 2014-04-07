@@ -4,13 +4,14 @@
 #include <stdint.h>
 #include <math.h>
 
-
-
-
-//#include "readpng.c"
-
 //----COMMAND TO COMPILE
 //gcc -std=c99 CreateImage.c -lm -lpng
+
+//Function declarations
+png_bytep * read_png_file(char* file_name, int * w, int* h, int*);
+int readFromPNG(char * inName, char * outName);
+int writeToPNG(char * inName, char * outName);
+
 
 
 //---------------------------------------------------------------------------------------------
@@ -19,16 +20,17 @@
 //---------------------------------------------------------------------------------------------
 //---------------------------------------------------------------------------------------------
     
-/* A coloured pixel. */
+/* A coloured pixel.
+ * Colour depth is 16
+ */
 
 typedef struct {
-    uint8_t red;
-    uint8_t green;
-    uint8_t blue;
+    uint16_t red;
+    uint16_t green;
+    uint16_t blue;
 } pixel_t;
 
-/* A picture. */
-    
+/* A picture. */    
 typedef struct  {
     pixel_t *pixels;
     size_t width;
@@ -62,7 +64,7 @@ static int save_png_to_file (bitmap_t *bitmap, const char *path)
        see where it it is documented in the libpng manual.
     */
     int pixel_size = 3;
-    int depth = 8;
+    int depth = 16;
     
     fp = fopen (path, "wb");
     if (! fp) {
@@ -99,16 +101,23 @@ static int save_png_to_file (bitmap_t *bitmap, const char *path)
     
     /* Initialize rows of PNG. */
 
+    int depth_factor = depth/8;   
     row_pointers = png_malloc (png_ptr, bitmap->height * sizeof (png_byte *));
     for (y = 0; y < bitmap->height; ++y) {
         png_byte *row = 
-            png_malloc (png_ptr, sizeof (uint8_t) * bitmap->width * pixel_size);
+            png_malloc (png_ptr, sizeof (uint16_t) * bitmap->width * pixel_size);
         row_pointers[y] = row;
         for (x = 0; x < bitmap->width; ++x) {
             pixel_t * pixel = pixel_at (bitmap, x, y);
-            *row++ = pixel->red;
-            *row++ = pixel->green;
-            *row++ = pixel->blue;
+
+            *row = pixel->red;
+            row+=depth_factor;
+
+            *row = pixel->green;
+            row+=depth_factor;
+
+            *row = pixel->blue;
+            row+=depth_factor;
         }
     }
     
@@ -152,16 +161,20 @@ int set_color(FILE* in_file, long num_chars, pixel_t * pixel){
     char num = 0; 
     char data[3];
     int status = 1;
+    //Gets the data from the file
     for(num = 0; num<3 && ftell(in_file) < num_chars; ++num){
         fread(&(data[num]),sizeof(char),1,in_file);
     }
+
+    //Set the rest that don't get read to 0
     for (;num<3; ++num){
         data[num] = 0;
         status = 0;
     }
-    (*pixel).red = (int)data[0];
-    (*pixel).green = (int)data[1];
-    (*pixel).blue = (int)data[2];
+   
+    (*pixel).red   = (int)(data[0]);
+    (*pixel).green = (int)(data[1]);
+    (*pixel).blue  = (int)(data[2]);
 
     return status;
 }
@@ -210,6 +223,65 @@ int writeToPNG(char * inName, char * outName){
 
     /* Write the image to a file 'map.png'. */
     save_png_to_file (& map, outName);
+
+    //Free the uneeded pixels
+    free(map.pixels);
+}
+
+int writeOverlayedPNG(char * inName, char * outName, char * maskName){
+    bitmap_t map;
+    int x = 0;
+    int y = 0;
+    
+    FILE* in_file = fopen(inName, "rb");
+
+    
+    //Gets the length of the file in chars
+    fseek(in_file, 0L, SEEK_END);
+    long num_chars = ftell(in_file);
+    fseek(in_file, 0L, SEEK_SET);
+
+    //Get the dimensions of the mask
+    int width,height, depth_factor;
+    png_bytep * mask_row_pointers = read_png_file(maskName,&width,&height, &depth_factor);
+    if(num_chars/3 > width*height){
+        fprintf(stderr, "%s\n", "File too large for mask");
+        return -1;
+    }
+
+    int status = 1;   
+
+    /* Create an image. */
+
+    map.width = width;
+    map.height = height;
+
+    map.pixels = calloc (sizeof (pixel_t), map.width * map.height);
+
+    for (y = 0; y < map.height; y++) {
+        for (x = 0; x < map.width; x++) {
+            if (status){
+                //Get the pixel
+                pixel_t * pixel = pixel_at(& map, x, y);
+
+                //Set the next pixel with the next characters
+                status = set_color(in_file, num_chars, pixel);                
+            }
+            else
+            {
+                pixel_t * pixel = pixel_at(& map, x, y);
+                (*pixel).red = 0;
+                (*pixel).green = 0;
+                (*pixel).blue = 0;
+                //fprintf(stderr, "%d ", y);
+            }
+        }
+    }
+    
+    fclose(in_file);
+
+    /* Write the image to a file 'map.png'. */
+    save_png_to_file (& map, outName);
     free(map.pixels);
 }
 
@@ -229,7 +301,7 @@ void abort_(const char * s, ...)
         abort();
 }
 
-png_bytep * read_png_file(char* file_name, int * w, int* h)
+png_bytep * read_png_file(char* file_name, int * w, int* h, int* depth_factor)
 {
     int x, y;
 
@@ -266,7 +338,7 @@ png_bytep * read_png_file(char* file_name, int * w, int* h)
             abort_("[read_png_file] Error during init_io");
 
     png_init_io(png_ptr, fp);
-    png_set_sig_bytes(png_ptr, 8);
+    png_set_sig_bytes(png_ptr, 8);      //Get the signature bytes
 
     png_read_info(png_ptr, info_ptr);
 
@@ -278,6 +350,8 @@ png_bytep * read_png_file(char* file_name, int * w, int* h)
 
     color_type = png_get_color_type(png_ptr, info_ptr);
     bit_depth = png_get_bit_depth(png_ptr, info_ptr);
+    fprintf(stderr, "Bit depth is %d\n", (int)bit_depth);
+    *depth_factor = bit_depth/8;
 
     number_of_passes = png_set_interlace_handling(png_ptr);
     png_read_update_info(png_ptr, info_ptr);
@@ -295,20 +369,31 @@ png_bytep * read_png_file(char* file_name, int * w, int* h)
     return(row_pointers);
 
     fclose(fp);
+    free(png_ptr);
 }
 
 int readFromPNG(char * inName, char * outName){
     FILE * outfile = fopen(outName, "wb");
-    int width,height;
-    png_bytep * row_pointers = read_png_file(inName,&width,&height);
+    int width,height, depth_factor;
+    png_bytep * row_pointers = read_png_file(inName,&width,&height, &depth_factor);
     for (int y = 0; y < height; y++) {
         png_byte* row = row_pointers[y];
         for (int x = 0; x < width; x++) {
-            png_byte* ptr = &(row[x*3]);
-            //Write the picture back out            
-            fwrite(ptr, sizeof(char), 3, outfile);       
+
+            png_byte* ptr = &(row[x*3*depth_factor]);
+
+            //Write the picture back out (currently writes low-bit)
+            for (int i = 0; i < 3; ++i)
+            {
+                fwrite(ptr+i*depth_factor, sizeof(char), 1, outfile);
+            }
+            
         }
+        free(row);
+        row_pointers[y] = NULL;
     }
+    free(row_pointers);
+    fclose(outfile);
 }
 
 
@@ -317,7 +402,7 @@ int main ()
 {   
     //Serializing and deserializing complete
     writeToPNG("blah.doc", "map.png");
-    readFromPNG("map.png", "out3.doc");
+    readFromPNG("map.png", "out.doc");
 
     return 0;
 }
