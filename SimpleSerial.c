@@ -101,23 +101,31 @@ static int save_png_to_file (bitmap_t *bitmap, const char *path)
     
     /* Initialize rows of PNG. */
 
-    int depth_factor = depth/8;   
+    int depth_factor = depth/8;
+    //fprintf(stderr, "[%d]\n", depth_factor);
+
     row_pointers = png_malloc (png_ptr, bitmap->height * sizeof (png_byte *));
     for (y = 0; y < bitmap->height; ++y) {
         png_byte *row = 
             png_malloc (png_ptr, sizeof (uint16_t) * bitmap->width * pixel_size);
         row_pointers[y] = row;
         for (x = 0; x < bitmap->width; ++x) {
-            pixel_t * pixel = pixel_at (bitmap, x, y);
+            pixel_t * pixel = pixel_at (bitmap, x, y);            
+            
+            for (int i = 0; i < depth_factor; ++i)
+            {                
+                *row++ = pixel->red>>i*8;                
+            }
 
-            *row = pixel->red;
-            row+=depth_factor;
+            for (int i = 0; i < depth_factor; ++i)
+            {                
+                *row++ = pixel->green>>i*8;                
+            }
 
-            *row = pixel->green;
-            row+=depth_factor;
-
-            *row = pixel->blue;
-            row+=depth_factor;
+            for (int i = 0; i < depth_factor; ++i)
+            {                
+                *row++ = pixel->blue>>i*8;                
+            }
         }
     }
     
@@ -157,8 +165,8 @@ static int pix (int value, int max)
     return (int) (256.0 *((double) (value)/(double) max));
 }
 
-int set_color(FILE* in_file, long num_chars, pixel_t * pixel){
-    char num = 0; 
+int set_color(FILE* in_file, long num_chars, pixel_t * pixel, int depth_factor){
+    char num = 0;
     char data[3];
     int status = 1;
     //Gets the data from the file
@@ -172,10 +180,18 @@ int set_color(FILE* in_file, long num_chars, pixel_t * pixel){
         status = 0;
     }
    
+    //Have it always write to low-bit
+    //------------------CHANGED---------------------
+    if(depth_factor == 1){                      //For 8 bit Images
+        (*pixel).red   = (int)(data[0] << 8);
+        (*pixel).green = (int)(data[1] << 8);
+        (*pixel).blue  = (int)(data[2] << 8);
+        return status;
+    }
+
     (*pixel).red   = (int)(data[0]);
     (*pixel).green = (int)(data[1]);
     (*pixel).blue  = (int)(data[2]);
-
     return status;
 }
 
@@ -206,7 +222,7 @@ int writeToPNG(char * inName, char * outName){
         for (x = 0; x < map.width; x++) {
             if (status){
                 pixel_t * pixel = pixel_at(& map, x, y);
-                status = set_color(in_file, num_chars, pixel);                
+                status = set_color(in_file, num_chars, pixel, 1);                
             }
             else
             {
@@ -216,7 +232,8 @@ int writeToPNG(char * inName, char * outName){
                 (*pixel).blue = 0;
                 //fprintf(stderr, "%d ", y);
             }
-        }
+
+       }
     }
     
     fclose(in_file);
@@ -245,39 +262,59 @@ int writeOverlayedPNG(char * inName, char * outName, char * maskName){
     int width,height, depth_factor;
     png_bytep * mask_row_pointers = read_png_file(maskName,&width,&height, &depth_factor);
     if(num_chars/3 > width*height){
-        fprintf(stderr, "%s\n", "File too large for mask");
+        fprintf(stderr, "%s\n", "Input file too large for given mask");
         return -1;
     }
+    if(depth_factor == 2){
+        fprintf(stderr, "%s\n", "Mask has 16 bit colour depth, find smaller mask");
+        return -1;
+    }
+
+    //Dimensions of the image    
+    float size = (float)(num_chars/3);  
+    int imw = ceil(sqrt(size/(width*height))*width);
+    int imh = ceil(sqrt(size/(width*height))*height);
+    //fprintf(stderr, "[%f] [%d] [%d] [%f]\n", size, imw, imh, sqrt(size));
 
     int status = 1;   
 
     /* Create an image. */
-
-    map.width = width;
-    map.height = height;
+    map.width = imw;
+    map.height = imh;
 
     map.pixels = calloc (sizeof (pixel_t), map.width * map.height);
 
-    for (y = 0; y < map.height; y++) {
-        for (x = 0; x < map.width; x++) {
+    for (y = 0; y < imh; y++) {
+        png_byte* row = mask_row_pointers[y];
+        for (x = 0; x < imw; x++) {
+            //Get the pixel
+             pixel_t * pixel = pixel_at(& map, x, y);
             if (status){
-                //Get the pixel
-                pixel_t * pixel = pixel_at(& map, x, y);
 
                 //Set the next pixel with the next characters
-                status = set_color(in_file, num_chars, pixel);                
+                status = set_color(in_file, num_chars, pixel, depth_factor);                
             }
             else
-            {
-                pixel_t * pixel = pixel_at(& map, x, y);
+            {                   
                 (*pixel).red = 0;
                 (*pixel).green = 0;
                 (*pixel).blue = 0;
-                //fprintf(stderr, "%d ", y);
+                
             }
+
+            //Add in the high bit from the mask (hight bit is by default first)
+            //------------------CHANGED---------------------
+            png_byte* ptr = &(row[x*3]);            
+            pixel->red   += (int)(ptr[0]);
+            pixel->green += (int)(ptr[1]);
+            pixel->blue  += (int)(ptr[2]);            
         }
+        free(row);
+        mask_row_pointers[y] = NULL;
     }
-    
+
+    free(mask_row_pointers);
+
     fclose(in_file);
 
     /* Write the image to a file 'map.png'. */
@@ -382,12 +419,11 @@ int readFromPNG(char * inName, char * outName){
 
             png_byte* ptr = &(row[x*3*depth_factor]);
 
-            //Write the picture back out (currently writes low-bit)
+            //------------------CHANGED---------------------            
             for (int i = 0; i < 3; ++i)
             {
-                fwrite(ptr+i*depth_factor, sizeof(char), 1, outfile);
-            }
-            
+                fwrite(ptr+(i*depth_factor) + depth_factor - 1, sizeof(char), 1, outfile);
+            }            
         }
         free(row);
         row_pointers[y] = NULL;
@@ -396,14 +432,11 @@ int readFromPNG(char * inName, char * outName){
     fclose(outfile);
 }
 
-
-
 int main ()
 {   
     //Serializing and deserializing complete
-    writeToPNG("blah.doc", "map.png");
-    readFromPNG("map.png", "out.doc");
+    writeOverlayedPNG("a.out", "map.png","BackgroundR.png");
+    readFromPNG("map.png", "example");
 
     return 0;
 }
-
