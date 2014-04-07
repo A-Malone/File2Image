@@ -435,8 +435,8 @@ int readFromPNG(char * inName, char * outName){
 int main ()
 {   
     //Serializing and deserializing complete
-    writeOverlayedPNG("a.out", "map.png","BackgroundR.png");
-    readFromPNG("map.png", "example");
+    writeOverlayedPNG("SimpleSerial.c", "map.png","BackgroundR.png");
+    readFromPNG("map.png", "out.c");
 
     return 0;
 }
